@@ -1,16 +1,17 @@
-<!--
-Thank you for sending the PR! We appreciate you spending the time to work on these changes. 
+<!-- Thanks for submitting a pull request! We appreciate you spending the time to work on these changes. Please provide enough information so that others can review your pull request. The three fields below are mandatory. -->
 
-Help us understand your motivation by explaining why you decided to make this change.
+## Summary
 
-You can learn more about contributing to React Native here: http://facebook.github.io/react-native/docs/contributing.html
+<!-- Explain the **motivation** for making this change. What existing problem does the pull request solve? -->
 
-Happy contributing!
+## Changelog
 
+<!-- Help reviewers and the release process by writing your own changelog entry. For an example, see:
+https://github.com/facebook/react-native/wiki/Changelog
 -->
 
-(Write your motivation here.)
+[CATEGORY] [TYPE] - Message
 
 ## Test Plan
 
-(Write your test plan here. If you changed any code, please provide us with clear instructions on how you verified your changes work. Bonus points for screenshots and videos!)
+<!-- Demonstrate the code is solid. Example: The exact commands you ran and their output, screenshots / videos if the pull request changes the user interface. -->

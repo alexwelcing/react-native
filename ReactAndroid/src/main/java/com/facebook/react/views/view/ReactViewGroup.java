@@ -1,14 +1,16 @@
-/**
- * Copyright (c) 2015-present, Facebook, Inc.
- * All rights reserved.
+/*
+ * Copyright (c) Facebook, Inc. and its affiliates.
  *
- * This source code is licensed under the BSD-style license found in the
- * LICENSE file in the root directory of this source tree. An additional grant
- * of patent rights can be found in the PATENTS file in the same directory.
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
  */
 
 package com.facebook.react.views.view;
 
+import static com.facebook.react.common.ReactConstants.TAG;
+
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -21,29 +23,44 @@ import android.os.Build;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewStructure;
 import android.view.animation.Animation;
+import androidx.annotation.Nullable;
+import com.facebook.common.logging.FLog;
 import com.facebook.infer.annotation.Assertions;
+import com.facebook.react.bridge.ReactContext;
+import com.facebook.react.bridge.UiThreadUtil;
 import com.facebook.react.common.annotations.VisibleForTesting;
+import com.facebook.react.modules.i18nmanager.I18nUtil;
 import com.facebook.react.touch.OnInterceptTouchEventListener;
 import com.facebook.react.touch.ReactHitSlopView;
 import com.facebook.react.touch.ReactInterceptingViewGroup;
+import com.facebook.react.uimanager.IllegalViewOperationException;
 import com.facebook.react.uimanager.MeasureSpecAssertions;
 import com.facebook.react.uimanager.PointerEvents;
 import com.facebook.react.uimanager.ReactClippingViewGroup;
 import com.facebook.react.uimanager.ReactClippingViewGroupHelper;
 import com.facebook.react.uimanager.ReactPointerEventsView;
 import com.facebook.react.uimanager.ReactZIndexedViewGroup;
+import com.facebook.react.uimanager.RootView;
+import com.facebook.react.uimanager.RootViewUtil;
 import com.facebook.react.uimanager.ViewGroupDrawingOrderHelper;
+import com.facebook.react.uimanager.ViewProps;
+import com.facebook.react.uimanager.common.UIManagerType;
+import com.facebook.react.uimanager.common.ViewUtil;
 import com.facebook.yoga.YogaConstants;
-import javax.annotation.Nullable;
 
 /**
  * Backing for a React View. Has support for borders, but since borders aren't common, lazy
  * initializes most of the storage needed for them.
  */
-public class ReactViewGroup extends ViewGroup implements
-    ReactInterceptingViewGroup, ReactClippingViewGroup, ReactPointerEventsView, ReactHitSlopView,
-    ReactZIndexedViewGroup {
+@TargetApi(Build.VERSION_CODES.LOLLIPOP)
+public class ReactViewGroup extends ViewGroup
+    implements ReactInterceptingViewGroup,
+        ReactClippingViewGroup,
+        ReactPointerEventsView,
+        ReactHitSlopView,
+        ReactZIndexedViewGroup {
 
   private static final int ARRAY_CAPACITY_INCREMENT = 12;
   private static final int DEFAULT_BACKGROUND_COLOR = Color.TRANSPARENT;
@@ -53,13 +70,13 @@ public class ReactViewGroup extends ViewGroup implements
 
   /**
    * This listener will be set for child views when removeClippedSubview property is enabled. When
-   * children layout is updated, it will call {@link #updateSubviewClipStatus} to notify parent
-   * view about that fact so that view can be attached/detached if necessary.
+   * children layout is updated, it will call {@link #updateSubviewClipStatus} to notify parent view
+   * about that fact so that view can be attached/detached if necessary.
    *
-   * TODO(7728005): Attach/detach views in batch - once per frame in case when multiple children
+   * <p>TODO(7728005): Attach/detach views in batch - once per frame in case when multiple children
    * update their layout.
    */
-  private static final class ChildrenLayoutChangeListener implements OnLayoutChangeListener {
+  private static final class ChildrenLayoutChangeListener implements View.OnLayoutChangeListener {
 
     private final ReactViewGroup mParent;
 
@@ -103,13 +120,22 @@ public class ReactViewGroup extends ViewGroup implements
   private @Nullable ReactViewBackgroundDrawable mReactBackgroundDrawable;
   private @Nullable OnInterceptTouchEventListener mOnInterceptTouchEventListener;
   private boolean mNeedsOffscreenAlphaCompositing = false;
-  private final ViewGroupDrawingOrderHelper mDrawingOrderHelper;
+  private @Nullable ViewGroupDrawingOrderHelper mDrawingOrderHelper = null;
   private @Nullable Path mPath;
+  private int mLayoutDirection;
+  private float mBackfaceOpacity = 1.f;
+  private String mBackfaceVisibility = "visible";
 
   public ReactViewGroup(Context context) {
     super(context);
+    setClipChildren(false);
+  }
 
-    mDrawingOrderHelper = new ViewGroupDrawingOrderHelper(this);
+  private ViewGroupDrawingOrderHelper getDrawingOrderHelper() {
+    if (mDrawingOrderHelper == null) {
+      mDrawingOrderHelper = new ViewGroupDrawingOrderHelper(this);
+    }
+    return mDrawingOrderHelper;
   }
 
   @Override
@@ -117,8 +143,7 @@ public class ReactViewGroup extends ViewGroup implements
     MeasureSpecAssertions.assertExplicitMeasureSpec(widthMeasureSpec, heightMeasureSpec);
 
     setMeasuredDimension(
-        MeasureSpec.getSize(widthMeasureSpec),
-        MeasureSpec.getSize(heightMeasureSpec));
+        MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec));
   }
 
   @Override
@@ -127,9 +152,27 @@ public class ReactViewGroup extends ViewGroup implements
   }
 
   @Override
+  public void onRtlPropertiesChanged(int layoutDirection) {
+    if (mReactBackgroundDrawable != null) {
+      mReactBackgroundDrawable.setResolvedLayoutDirection(mLayoutDirection);
+    }
+  }
+
+  @Override
+  @SuppressLint("MissingSuperCall")
   public void requestLayout() {
     // No-op, terminate `requestLayout` here, UIManagerModule handles laying out children and
     // `layout` is called on all RN-managed views by `NativeViewHierarchyManager`
+  }
+
+  @TargetApi(23)
+  @Override
+  public void dispatchProvideStructure(ViewStructure structure) {
+    try {
+      super.dispatchProvideStructure(structure);
+    } catch (NullPointerException e) {
+      FLog.e(TAG, "NullPointerException when executing dispatchProvideStructure", e);
+    }
   }
 
   @Override
@@ -149,7 +192,7 @@ public class ReactViewGroup extends ViewGroup implements
 
   public void setTranslucentBackgroundDrawable(@Nullable Drawable background) {
     // it's required to call setBackground to null, as in some of the cases we may set new
-    // background to be a layer drawable that contains a drawable that has been previously setup
+    // background to be a layer drawable that contains a drawable that has been setup
     // as a background previously. This will not work correctly as the drawable callback logic is
     // messed up in AOSP
     updateBackgroundDrawable(null);
@@ -169,8 +212,8 @@ public class ReactViewGroup extends ViewGroup implements
 
   @Override
   public boolean onInterceptTouchEvent(MotionEvent ev) {
-    if (mOnInterceptTouchEventListener != null &&
-        mOnInterceptTouchEventListener.onInterceptTouchEvent(this, ev)) {
+    if (mOnInterceptTouchEventListener != null
+        && mOnInterceptTouchEventListener.onInterceptTouchEvent(this, ev)) {
       return true;
     }
     // We intercept the touch event if the children are not supposed to receive it.
@@ -203,9 +246,7 @@ public class ReactViewGroup extends ViewGroup implements
     return mNeedsOffscreenAlphaCompositing;
   }
 
-  /**
-   * See the documentation of needsOffscreenAlphaCompositing in View.js.
-   */
+  /** See the documentation of needsOffscreenAlphaCompositing in View.js. */
   public void setNeedsOffscreenAlphaCompositing(boolean needsOffscreenAlphaCompositing) {
     mNeedsOffscreenAlphaCompositing = needsOffscreenAlphaCompositing;
   }
@@ -219,11 +260,13 @@ public class ReactViewGroup extends ViewGroup implements
   }
 
   public void setBorderRadius(float borderRadius) {
-    getOrCreateReactViewBackground().setRadius(borderRadius);
+    ReactViewBackgroundDrawable backgroundDrawable = getOrCreateReactViewBackground();
+    backgroundDrawable.setRadius(borderRadius);
   }
 
   public void setBorderRadius(float borderRadius, int position) {
-    getOrCreateReactViewBackground().setRadius(borderRadius, position);
+    ReactViewBackgroundDrawable backgroundDrawable = getOrCreateReactViewBackground();
+    backgroundDrawable.setRadius(borderRadius, position);
   }
 
   public void setBorderStyle(@Nullable String style) {
@@ -301,10 +344,13 @@ public class ReactViewGroup extends ViewGroup implements
   }
 
   private void updateSubviewClipStatus(Rect clippingRect, int idx, int clippedSoFar) {
+    UiThreadUtil.assertOnUiThread();
+
     View child = Assertions.assertNotNull(mAllChildren)[idx];
     sHelperRect.set(child.getLeft(), child.getTop(), child.getRight(), child.getBottom());
-    boolean intersects = clippingRect
-        .intersects(sHelperRect.left, sHelperRect.top, sHelperRect.right, sHelperRect.bottom);
+    boolean intersects =
+        clippingRect.intersects(
+            sHelperRect.left, sHelperRect.top, sHelperRect.right, sHelperRect.bottom);
     boolean needUpdateClippingRecursive = false;
     // We never want to clip children that are being animated, as this can easily break layout :
     // when layout animation changes size and/or position of views contained inside a listview that
@@ -349,8 +395,9 @@ public class ReactViewGroup extends ViewGroup implements
 
     // do fast check whether intersect state changed
     sHelperRect.set(subview.getLeft(), subview.getTop(), subview.getRight(), subview.getBottom());
-    boolean intersects = mClippingRect
-        .intersects(sHelperRect.left, sHelperRect.top, sHelperRect.right, sHelperRect.bottom);
+    boolean intersects =
+        mClippingRect.intersects(
+            sHelperRect.left, sHelperRect.top, sHelperRect.right, sHelperRect.bottom);
 
     // If it was intersecting before, should be attached to the parent
     boolean oldIntersects = (subview.getParent() != null);
@@ -370,6 +417,11 @@ public class ReactViewGroup extends ViewGroup implements
   }
 
   @Override
+  public boolean getChildVisibleRect(View child, Rect r, android.graphics.Point offset) {
+    return super.getChildVisibleRect(child, r, offset);
+  }
+
+  @Override
   protected void onSizeChanged(int w, int h, int oldw, int oldh) {
     super.onSizeChanged(w, h, oldw, oldh);
     if (mRemoveClippedSubviews) {
@@ -385,49 +437,87 @@ public class ReactViewGroup extends ViewGroup implements
     }
   }
 
+  private boolean customDrawOrderDisabled() {
+    if (getId() == NO_ID) {
+      return false;
+    }
+    return ViewUtil.getUIManagerType(getId()) == UIManagerType.FABRIC;
+  }
+
   @Override
-  public void addView(View child, int index, LayoutParams params) {
-    // This will get called for every overload of addView so there is not need to override every method.
-    mDrawingOrderHelper.handleAddView(child);
-    setChildrenDrawingOrderEnabled(mDrawingOrderHelper.shouldEnableCustomDrawingOrder());
+  public void addView(View child, int index, ViewGroup.LayoutParams params) {
+    // This will get called for every overload of addView so there is not need to override every
+    // method.
+
+    if (!customDrawOrderDisabled()) {
+      getDrawingOrderHelper().handleAddView(child);
+      setChildrenDrawingOrderEnabled(getDrawingOrderHelper().shouldEnableCustomDrawingOrder());
+    } else {
+      setChildrenDrawingOrderEnabled(false);
+    }
 
     super.addView(child, index, params);
   }
 
   @Override
   public void removeView(View view) {
-    mDrawingOrderHelper.handleRemoveView(view);
-    setChildrenDrawingOrderEnabled(mDrawingOrderHelper.shouldEnableCustomDrawingOrder());
+    UiThreadUtil.assertOnUiThread();
+
+    if (!customDrawOrderDisabled()) {
+      getDrawingOrderHelper().handleRemoveView(view);
+      setChildrenDrawingOrderEnabled(getDrawingOrderHelper().shouldEnableCustomDrawingOrder());
+    } else {
+      setChildrenDrawingOrderEnabled(false);
+    }
 
     super.removeView(view);
   }
 
   @Override
   public void removeViewAt(int index) {
-    mDrawingOrderHelper.handleRemoveView(getChildAt(index));
-    setChildrenDrawingOrderEnabled(mDrawingOrderHelper.shouldEnableCustomDrawingOrder());
+    UiThreadUtil.assertOnUiThread();
+
+    if (!customDrawOrderDisabled()) {
+      getDrawingOrderHelper().handleRemoveView(getChildAt(index));
+      setChildrenDrawingOrderEnabled(getDrawingOrderHelper().shouldEnableCustomDrawingOrder());
+    } else {
+      setChildrenDrawingOrderEnabled(false);
+    }
 
     super.removeViewAt(index);
   }
 
   @Override
   protected int getChildDrawingOrder(int childCount, int index) {
-    return mDrawingOrderHelper.getChildDrawingOrder(childCount, index);
-  }
+    UiThreadUtil.assertOnUiThread();
 
-  @Override
-  public int getZIndexMappedChildIndex(int index) {
-    if (mDrawingOrderHelper.shouldEnableCustomDrawingOrder()) {
-      return mDrawingOrderHelper.getChildDrawingOrder(getChildCount(), index);
+    if (!customDrawOrderDisabled()) {
+      return getDrawingOrderHelper().getChildDrawingOrder(childCount, index);
     } else {
       return index;
     }
   }
 
   @Override
+  public int getZIndexMappedChildIndex(int index) {
+    UiThreadUtil.assertOnUiThread();
+
+    if (!customDrawOrderDisabled() && getDrawingOrderHelper().shouldEnableCustomDrawingOrder()) {
+      return getDrawingOrderHelper().getChildDrawingOrder(getChildCount(), index);
+    }
+
+    // Fabric behavior
+    return index;
+  }
+
+  @Override
   public void updateDrawingOrder() {
-    mDrawingOrderHelper.update();
-    setChildrenDrawingOrderEnabled(mDrawingOrderHelper.shouldEnableCustomDrawingOrder());
+    if (customDrawOrderDisabled()) {
+      return;
+    }
+
+    getDrawingOrderHelper().update();
+    setChildrenDrawingOrderEnabled(getDrawingOrderHelper().shouldEnableCustomDrawingOrder());
     invalidate();
   }
 
@@ -458,7 +548,8 @@ public class ReactViewGroup extends ViewGroup implements
     addViewWithSubviewClippingEnabled(child, index, sDefaultLayoutParam);
   }
 
-  /*package*/ void addViewWithSubviewClippingEnabled(View child, int index, LayoutParams params) {
+  /*package*/ void addViewWithSubviewClippingEnabled(
+      View child, int index, ViewGroup.LayoutParams params) {
     Assertions.assertCondition(mRemoveClippedSubviews);
     Assertions.assertNotNull(mClippingRect);
     Assertions.assertNotNull(mAllChildren);
@@ -476,6 +567,8 @@ public class ReactViewGroup extends ViewGroup implements
   }
 
   /*package*/ void removeViewWithSubviewClippingEnabled(View view) {
+    UiThreadUtil.assertOnUiThread();
+
     Assertions.assertCondition(mRemoveClippedSubviews);
     Assertions.assertNotNull(mClippingRect);
     Assertions.assertNotNull(mAllChildren);
@@ -565,11 +658,11 @@ public class ReactViewGroup extends ViewGroup implements
 
   private ReactViewBackgroundDrawable getOrCreateReactViewBackground() {
     if (mReactBackgroundDrawable == null) {
-      mReactBackgroundDrawable = new ReactViewBackgroundDrawable();
+      mReactBackgroundDrawable = new ReactViewBackgroundDrawable(getContext());
       Drawable backgroundDrawable = getBackground();
       updateBackgroundDrawable(
           null); // required so that drawable callback is cleared before we add the
-                                  // drawable back as a part of LayerDrawable
+      // drawable back as a part of LayerDrawable
       if (backgroundDrawable == null) {
         updateBackgroundDrawable(mReactBackgroundDrawable);
       } else {
@@ -577,6 +670,10 @@ public class ReactViewGroup extends ViewGroup implements
             new LayerDrawable(new Drawable[] {mReactBackgroundDrawable, backgroundDrawable});
         updateBackgroundDrawable(layerDrawable);
       }
+
+      mLayoutDirection =
+          I18nUtil.getInstance().isRTL(getContext()) ? LAYOUT_DIRECTION_RTL : LAYOUT_DIRECTION_LTR;
+      mReactBackgroundDrawable.setResolvedLayoutDirection(mLayoutDirection);
     }
     return mReactBackgroundDrawable;
   }
@@ -595,6 +692,10 @@ public class ReactViewGroup extends ViewGroup implements
     invalidate();
   }
 
+  public @Nullable String getOverflow() {
+    return mOverflow;
+  }
+
   /**
    * Set the background for the view or remove the background. It calls {@link
    * #setBackground(Drawable)} or {@link #setBackgroundDrawable(Drawable)} based on the sdk version.
@@ -603,52 +704,212 @@ public class ReactViewGroup extends ViewGroup implements
    *     background
    */
   private void updateBackgroundDrawable(Drawable drawable) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
-      super.setBackground(drawable);
-    } else {
-      super.setBackgroundDrawable(drawable);
-    }
+    super.setBackground(drawable);
   }
 
   @Override
   protected void dispatchDraw(Canvas canvas) {
+    try {
+      dispatchOverflowDraw(canvas);
+      super.dispatchDraw(canvas);
+    } catch (NullPointerException | StackOverflowError e) {
+      // Adding special exception management for StackOverflowError for logging purposes.
+      // This will be removed in the future.
+      RootView rootView = RootViewUtil.getRootView(ReactViewGroup.this);
+      if (rootView != null) {
+        rootView.handleException(e);
+      } else {
+        if (getContext() instanceof ReactContext) {
+          ReactContext reactContext = (ReactContext) getContext();
+          reactContext.handleException(
+              new IllegalViewOperationException("StackOverflowException", this, e));
+        } else {
+          throw e;
+        }
+      }
+    }
+  }
+
+  private void dispatchOverflowDraw(Canvas canvas) {
     if (mOverflow != null) {
       switch (mOverflow) {
-        case "visible":
+        case ViewProps.VISIBLE:
           if (mPath != null) {
             mPath.rewind();
           }
           break;
-        case "hidden":
-          if (mReactBackgroundDrawable != null) {
-            float left = 0f;
-            float top = 0f;
-            float right = getWidth();
-            float bottom = getHeight();
-            if (mReactBackgroundDrawable.getFullBorderWidth() != 0f) {
-              float borderWidth = mReactBackgroundDrawable.getFullBorderWidth();
-              left += borderWidth;
-              top += borderWidth;
-              right -= borderWidth;
-              bottom -= borderWidth;
-            }
-            float radius = mReactBackgroundDrawable.getRadius();
+        case ViewProps.HIDDEN:
+          float left = 0f;
+          float top = 0f;
+          float right = getWidth();
+          float bottom = getHeight();
 
-            if (radius != YogaConstants.UNDEFINED) {
+          boolean hasClipPath = false;
+
+          if (mReactBackgroundDrawable != null) {
+            final RectF borderWidth = mReactBackgroundDrawable.getDirectionAwareBorderInsets();
+
+            if (borderWidth.top > 0
+                || borderWidth.left > 0
+                || borderWidth.bottom > 0
+                || borderWidth.right > 0) {
+              left += borderWidth.left;
+              top += borderWidth.top;
+              right -= borderWidth.right;
+              bottom -= borderWidth.bottom;
+            }
+
+            final float borderRadius = mReactBackgroundDrawable.getFullBorderRadius();
+            float topLeftBorderRadius =
+                mReactBackgroundDrawable.getBorderRadiusOrDefaultTo(
+                    borderRadius, ReactViewBackgroundDrawable.BorderRadiusLocation.TOP_LEFT);
+            float topRightBorderRadius =
+                mReactBackgroundDrawable.getBorderRadiusOrDefaultTo(
+                    borderRadius, ReactViewBackgroundDrawable.BorderRadiusLocation.TOP_RIGHT);
+            float bottomLeftBorderRadius =
+                mReactBackgroundDrawable.getBorderRadiusOrDefaultTo(
+                    borderRadius, ReactViewBackgroundDrawable.BorderRadiusLocation.BOTTOM_LEFT);
+            float bottomRightBorderRadius =
+                mReactBackgroundDrawable.getBorderRadiusOrDefaultTo(
+                    borderRadius, ReactViewBackgroundDrawable.BorderRadiusLocation.BOTTOM_RIGHT);
+
+            final boolean isRTL = mLayoutDirection == View.LAYOUT_DIRECTION_RTL;
+            float topStartBorderRadius =
+                mReactBackgroundDrawable.getBorderRadius(
+                    ReactViewBackgroundDrawable.BorderRadiusLocation.TOP_START);
+            float topEndBorderRadius =
+                mReactBackgroundDrawable.getBorderRadius(
+                    ReactViewBackgroundDrawable.BorderRadiusLocation.TOP_END);
+            float bottomStartBorderRadius =
+                mReactBackgroundDrawable.getBorderRadius(
+                    ReactViewBackgroundDrawable.BorderRadiusLocation.BOTTOM_START);
+            float bottomEndBorderRadius =
+                mReactBackgroundDrawable.getBorderRadius(
+                    ReactViewBackgroundDrawable.BorderRadiusLocation.BOTTOM_END);
+
+            if (I18nUtil.getInstance().doLeftAndRightSwapInRTL(getContext())) {
+              if (YogaConstants.isUndefined(topStartBorderRadius)) {
+                topStartBorderRadius = topLeftBorderRadius;
+              }
+
+              if (YogaConstants.isUndefined(topEndBorderRadius)) {
+                topEndBorderRadius = topRightBorderRadius;
+              }
+
+              if (YogaConstants.isUndefined(bottomStartBorderRadius)) {
+                bottomStartBorderRadius = bottomLeftBorderRadius;
+              }
+
+              if (YogaConstants.isUndefined(bottomEndBorderRadius)) {
+                bottomEndBorderRadius = bottomRightBorderRadius;
+              }
+
+              final float directionAwareTopLeftRadius =
+                  isRTL ? topEndBorderRadius : topStartBorderRadius;
+              final float directionAwareTopRightRadius =
+                  isRTL ? topStartBorderRadius : topEndBorderRadius;
+              final float directionAwareBottomLeftRadius =
+                  isRTL ? bottomEndBorderRadius : bottomStartBorderRadius;
+              final float directionAwareBottomRightRadius =
+                  isRTL ? bottomStartBorderRadius : bottomEndBorderRadius;
+
+              topLeftBorderRadius = directionAwareTopLeftRadius;
+              topRightBorderRadius = directionAwareTopRightRadius;
+              bottomLeftBorderRadius = directionAwareBottomLeftRadius;
+              bottomRightBorderRadius = directionAwareBottomRightRadius;
+            } else {
+              final float directionAwareTopLeftRadius =
+                  isRTL ? topEndBorderRadius : topStartBorderRadius;
+              final float directionAwareTopRightRadius =
+                  isRTL ? topStartBorderRadius : topEndBorderRadius;
+              final float directionAwareBottomLeftRadius =
+                  isRTL ? bottomEndBorderRadius : bottomStartBorderRadius;
+              final float directionAwareBottomRightRadius =
+                  isRTL ? bottomStartBorderRadius : bottomEndBorderRadius;
+
+              if (!YogaConstants.isUndefined(directionAwareTopLeftRadius)) {
+                topLeftBorderRadius = directionAwareTopLeftRadius;
+              }
+
+              if (!YogaConstants.isUndefined(directionAwareTopRightRadius)) {
+                topRightBorderRadius = directionAwareTopRightRadius;
+              }
+
+              if (!YogaConstants.isUndefined(directionAwareBottomLeftRadius)) {
+                bottomLeftBorderRadius = directionAwareBottomLeftRadius;
+              }
+
+              if (!YogaConstants.isUndefined(directionAwareBottomRightRadius)) {
+                bottomRightBorderRadius = directionAwareBottomRightRadius;
+              }
+            }
+
+            if (topLeftBorderRadius > 0
+                || topRightBorderRadius > 0
+                || bottomRightBorderRadius > 0
+                || bottomLeftBorderRadius > 0) {
               if (mPath == null) {
                 mPath = new Path();
               }
+
               mPath.rewind();
               mPath.addRoundRect(
-                  new RectF(left, top, right, bottom), radius, radius, Path.Direction.CW);
+                  new RectF(left, top, right, bottom),
+                  new float[] {
+                    Math.max(topLeftBorderRadius - borderWidth.left, 0),
+                    Math.max(topLeftBorderRadius - borderWidth.top, 0),
+                    Math.max(topRightBorderRadius - borderWidth.right, 0),
+                    Math.max(topRightBorderRadius - borderWidth.top, 0),
+                    Math.max(bottomRightBorderRadius - borderWidth.right, 0),
+                    Math.max(bottomRightBorderRadius - borderWidth.bottom, 0),
+                    Math.max(bottomLeftBorderRadius - borderWidth.left, 0),
+                    Math.max(bottomLeftBorderRadius - borderWidth.bottom, 0),
+                  },
+                  Path.Direction.CW);
               canvas.clipPath(mPath);
+              hasClipPath = true;
             }
+          }
+
+          if (!hasClipPath) {
+            canvas.clipRect(new RectF(left, top, right, bottom));
           }
           break;
         default:
           break;
       }
     }
-    super.dispatchDraw(canvas);
+  }
+
+  public void setOpacityIfPossible(float opacity) {
+    mBackfaceOpacity = opacity;
+    setBackfaceVisibilityDependantOpacity();
+  }
+
+  public void setBackfaceVisibility(String backfaceVisibility) {
+    mBackfaceVisibility = backfaceVisibility;
+    setBackfaceVisibilityDependantOpacity();
+  }
+
+  public void setBackfaceVisibilityDependantOpacity() {
+    boolean isBackfaceVisible = mBackfaceVisibility.equals("visible");
+
+    if (isBackfaceVisible) {
+      setAlpha(mBackfaceOpacity);
+      return;
+    }
+
+    float rotationX = getRotationX();
+    float rotationY = getRotationY();
+
+    boolean isFrontfaceVisible =
+        (rotationX >= -90.f && rotationX < 90.f) && (rotationY >= -90.f && rotationY < 90.f);
+
+    if (isFrontfaceVisible) {
+      setAlpha(mBackfaceOpacity);
+      return;
+    }
+
+    setAlpha(0);
   }
 }
